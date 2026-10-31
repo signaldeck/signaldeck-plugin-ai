@@ -14,6 +14,7 @@
     const fresh = root.querySelector(".sdai-new");
     const field = root.querySelector(".sdai-input");
     const send = root.querySelector(".sdai-send");
+    const stop = root.querySelector(".sdai-stop");
     const approvals = root.querySelector(".sdai-approval");
     const approvalText = root.querySelector(".sdai-approval-text");
     const form = root.querySelector(".sdai-form");
@@ -211,6 +212,8 @@
       tokenField.disabled = connected || busy;
       field.disabled = !connected || busy || remoteBusy || Boolean(interrupt);
       send.disabled = !connected || busy || remoteBusy || Boolean(interrupt);
+      stop.hidden = !(connected && (busy || remoteBusy));
+      stop.disabled = !connected || !(busy || remoteBusy);
       fresh.disabled = !connected || busy || remoteBusy;
       status.textContent = (busy || remoteBusy) ? "Agent arbeitet ..." :
         connected ? (interrupt ? "Freigabe erforderlich" : "Verbunden") : "Nicht verbunden";
@@ -396,6 +399,9 @@
             break;
           case "RUN_FINISHED":
             completed = true;
+            if (evt.outcome?.type === "cancelled") {
+              render("info", "Agentenlauf abgebrochen.");
+            }
             if (evt.outcome?.type === "interrupt") {
               const item = evt.outcome.interrupts?.[0];
               if (item && item.id) {
@@ -450,6 +456,13 @@
         void syncState();
       }
     }
+
+    stop.addEventListener("click", () => {
+      if (!connectionId) return;
+      stop.disabled = true;
+      void action("cancel").then(() => { status.textContent = "Abbruch angefordert ..."; })
+        .catch(error => { status.textContent = String(error.message || error); stop.disabled = false; });
+    });
 
     form.addEventListener("submit", event => {
       event.preventDefault();
