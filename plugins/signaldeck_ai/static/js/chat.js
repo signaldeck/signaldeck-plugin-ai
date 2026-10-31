@@ -399,6 +399,9 @@
             break;
           case "RUN_FINISHED":
             completed = true;
+            if (evt.outcome?.type === "cancelled") {
+              render("info", "Agentenlauf abgebrochen.");
+            }
             if (evt.outcome?.type === "interrupt") {
               const item = evt.outcome.interrupts?.[0];
               if (item && item.id) {
