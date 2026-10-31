@@ -489,3 +489,81 @@ def test_browser_markdown_supports_tables_and_escapes_untrusted_content():
         ["node", "--test", "tests/chat_markdown.test.cjs"],
         cwd=root, check=True, capture_output=True,
     )
+
+
+def test_cancel_race_does_not_commit_late_success_or_interrupt():
+    """An acknowledged Stop must win over buffered terminal SSE events."""
+    from signaldeck_ai.chat_runtime import AgentRun
+
+    def transport(request):
+        if request.url.path == "/ag-ui/capabilities":
+            return httpx.Response(200, json={"identity": {"name": "agent"}})
+        if request.url.path == "/ag-ui":
+            assert json.loads(request.content)["action"] == "cancel"
+            return httpx.Response(202, json={"status": "cancelling"})
+        return httpx.Response(404)
+
+    runtime = ChatRuntime(
+        "http://127.0.0.1:8765/ag-ui",
+        http_client_factory=lambda **kwargs: httpx.Client(
+            transport=httpx.MockTransport(transport), **kwargs,
+        ),
+    )
+    identifier = runtime.verify_and_connect("test-secret")
+    conn = runtime._connections[identifier]
+    for outcome in ("success", "interrupt"):
+        run = AgentRun(run_id="run-" + outcome, thread_id=conn.thread_id, payload={})
+        conn.current_run = run.run_id
+        conn.runs = {run.run_id: run}
+        conn.pending_interrupt = None
+        runtime.cancel(identifier)
+        assert run.cancel_requested
+        runtime._receive_frame(conn, run, [
+            json.dumps({"type": "TEXT_MESSAGE_START", "messageId": "a", "role": "assistant"})
+        ])
+        runtime._receive_frame(conn, run, [
+            json.dumps({"type": "TEXT_MESSAGE_CONTENT", "messageId": "a", "delta": "late"})
+        ])
+        runtime._receive_frame(conn, run, [
+            json.dumps({"type": "TEXT_MESSAGE_END", "messageId": "a"})
+        ])
+        runtime._receive_frame(conn, run, [
+            json.dumps({"type": "RUN_FINISHED", "outcome": {
+                "type": outcome, "interrupts": [{"id": "approval-1"}],
+            }})
+        ])
+        assert run.cancelled
+        assert not run.interrupted
+        assert conn.pending_interrupt is None
+        # Finalization must not turn buffered answer fragments into chat history.
+        assert not any(x.get("content") == "late" for x in conn.messages)
+        assert run.events[-1][1]["outcome"]["type"] == "cancelled"
+
+
+def test_cancel_rejected_does_not_discard_terminal_result():
+    """When upstream has already finished, the real success remains visible."""
+    from signaldeck_ai.chat_runtime import AgentRun
+
+    def transport(request):
+        if request.url.path == "/ag-ui/capabilities":
+            return httpx.Response(200, json={})
+        return httpx.Response(409)
+
+    runtime = ChatRuntime(
+        "http://127.0.0.1:8765/ag-ui",
+        http_client_factory=lambda **kwargs: httpx.Client(
+            transport=httpx.MockTransport(transport), **kwargs,
+        ),
+    )
+    ident = runtime.verify_and_connect("test-secret")
+    conn = runtime._connections[ident]
+    run = AgentRun(run_id="run", thread_id=conn.thread_id, payload={})
+    conn.current_run = run.run_id
+    conn.runs = {run.run_id: run}
+    with pytest.raises(ChatActionError, match="409"):
+        runtime.cancel(ident)
+    assert not run.cancel_requested
+    runtime._receive_frame(conn, run, [json.dumps({
+        "type": "RUN_FINISHED", "outcome": {"type": "success"},
+    })])
+    assert run.done and not run.cancelled
