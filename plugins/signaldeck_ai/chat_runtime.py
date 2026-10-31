@@ -43,6 +43,7 @@ class AgentRun:
     finalized: bool = False
     interrupted: bool = False
     failed: bool = False
+    cancel_requested: bool = False
     answer: str = ""
     _message_fragments: dict[str, str] = field(default_factory=dict, repr=False)
     changed: threading.Condition = field(default_factory=threading.Condition, repr=False)
@@ -295,6 +296,38 @@ class ChatRuntime:
                 "role": "user", "content": message.strip(),
             })
             return self._submit_locked(connection)
+
+    def cancel(self, identifier: str) -> str:
+        """Request cancellation of the active run without deleting its thread."""
+        with self._lock:
+            connection = self._connection_locked(identifier)
+            run = connection.runs.get(connection.current_run or "")
+            if run is None or run.done:
+                raise ChatActionError("Kein aktiver Agentenlauf vorhanden.")
+            if run.cancel_requested:
+                return run.run_id
+            # Flag first: a running reader must not accept a late success
+            # after the user has requested cancellation.
+            run.cancel_requested = True
+            token = connection.token
+            thread_id = run.thread_id
+            run_id = run.run_id
+        try:
+            with self._client_factory(timeout=8.0) as client:
+                response = client.post(
+                    self.endpoint,
+                    headers={**self._headers(token), "Content-Type": "application/json"},
+                    json={"action": "cancel", "threadId": thread_id, "runId": run_id},
+                )
+            if response.status_code != 202:
+                raise ChatActionError(
+                    f"Agent hat den Abbruch abgelehnt (HTTP {response.status_code})."
+                )
+        except httpx.HTTPError as exc:
+            with self._lock:
+                run.cancel_requested = False
+            raise ChatActionError("Agent für Abbruch nicht erreichbar.") from exc
+        return run_id
 
     def approve(self, identifier: str, interrupt_id: str, decision: str) -> str:
         if decision not in {"yes", "no", "session"}:
