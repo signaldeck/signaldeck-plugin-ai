@@ -43,9 +43,15 @@ class AgentRun:
     finalized: bool = False
     interrupted: bool = False
     failed: bool = False
+    cancel_requested: bool = False
+    cancelled: bool = False
     answer: str = ""
     _message_fragments: dict[str, str] = field(default_factory=dict, repr=False)
     changed: threading.Condition = field(default_factory=threading.Condition, repr=False)
+    # Serialize Stop acknowledgements with incoming terminal SSE events.
+    # Do not hold ChatRuntime._lock during the outbound HTTP request: different
+    # SignalDeck views must remain usable while one cancellation is pending.
+    cancel_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def emit(self, event: dict[str, Any]) -> None:
         if len(json.dumps(event, ensure_ascii=False).encode("utf-8")) > MAX_EVENT_BYTES:
@@ -66,6 +72,7 @@ class AgentRun:
                     self.answer += msg
             elif kind == "RUN_FINISHED":
                 self.interrupted = event.get("outcome", {}).get("type") == "interrupt"
+                self.cancelled = event.get("outcome", {}).get("type") == "cancelled"
                 self.done = True
             elif kind == "RUN_ERROR":
                 self.failed = True
@@ -296,6 +303,52 @@ class ChatRuntime:
             })
             return self._submit_locked(connection)
 
+    def cancel(self, identifier: str) -> str:
+        """Cancel an active run without deleting the chat or MCP session.
+
+        Serialize the upstream request with terminal SSE handling. Only
+        acknowledge cancellation locally after the backend accepts it. If
+        the run already ended, retain its actual terminal outcome instead.
+        """
+        with self._lock:
+            connection = self._connection_locked(identifier)
+            run = connection.runs.get(connection.current_run or "")
+            if run is None or run.finalized:
+                raise ChatActionError("Kein aktiver Agentenlauf vorhanden.")
+
+        with run.cancel_lock:
+            with self._lock:
+                # A terminal event may have been processed while waiting for
+                # the per-run lock; never cancel a different/current run.
+                if (connection.revoked or connection.current_run != run.run_id
+                        or run.finalized or run.done):
+                    raise ChatActionError("Kein aktiver Agentenlauf vorhanden.")
+                if run.cancel_requested:
+                    return run.run_id
+                token = connection.token
+                thread_id = run.thread_id
+                run_id = run.run_id
+            try:
+                with self._client_factory(timeout=8.0) as client:
+                    response = client.post(
+                        self.endpoint,
+                        headers={**self._headers(token), "Content-Type": "application/json"},
+                        json={"action": "cancel", "threadId": thread_id, "runId": run_id},
+                    )
+            except httpx.HTTPError as exc:
+                raise ChatActionError("Agent für Abbruch nicht erreichbar.") from exc
+            if response.status_code != 202:
+                raise ChatActionError(
+                    f"Agent hat den Abbruch abgelehnt (HTTP {response.status_code})."
+                )
+            with self._lock:
+                run.cancel_requested = True
+                # An in-flight interrupt must not keep the chat blocked after
+                # the server has accepted cancellation of this run.
+                if connection.current_run == run.run_id:
+                    connection.pending_interrupt = None
+            return run_id
+
     def approve(self, identifier: str, interrupt_id: str, decision: str) -> str:
         if decision not in {"yes", "no", "session"}:
             raise ChatActionError("Ungültige Freigabeentscheidung.")
@@ -319,7 +372,7 @@ class ChatRuntime:
     def _assert_idle(self, connection: AgentConnection) -> None:
         if connection.current_run is not None:
             existing = connection.runs.get(connection.current_run)
-            if existing is not None and not existing.done:
+            if existing is not None and not existing.finalized:
                 raise ChatActionError("Agent bearbeitet bereits eine Anfrage.")
 
     def _submit_locked(
@@ -369,19 +422,21 @@ class ChatRuntime:
                             lines.append(line[5:].lstrip(" "))
                     if lines:
                         self._receive_frame(connection, run, lines)
-            if not run.done:
-                run.emit({"type": "RUN_ERROR", "message": "AG-UI-Stream unerwartet beendet."})
+            with run.cancel_lock:
+                if not run.done:
+                    run.emit({"type": "RUN_ERROR", "message": "AG-UI-Stream unerwartet beendet."})
         except Exception:
-            if not run.done and not connection.revoked:
-                run.emit({"type": "RUN_ERROR", "message": "AG-UI-Agentenlauf fehlgeschlagen."})
+            with run.cancel_lock:
+                if not run.done and not connection.revoked:
+                    run.emit({"type": "RUN_ERROR", "message": "AG-UI-Agentenlauf fehlgeschlagen."})
         finally:
-            with self._lock:
+            with run.cancel_lock, self._lock:
                 if not connection.revoked and connection.current_run == run.run_id:
                     if run.failed or not run.done:
                         self._record_tool_activity(
                             connection, run, {"type": "RUN_ERROR"},
                         )
-                    if run.done and not run.failed:
+                    if run.done and not run.failed and not run.cancelled and not run.cancel_requested:
                         if run.answer and not run.interrupted:
                             connection.messages.append({
                                 "id": uuid.uuid4().hex,
@@ -400,10 +455,24 @@ class ChatRuntime:
                 run.finalized = True
 
     def _receive_frame(self, connection: AgentConnection, run: AgentRun, lines: list[str]):
+        with run.cancel_lock:
+            self._receive_frame_serialized(connection, run, lines)
+
+    def _receive_frame_serialized(
+        self, connection: AgentConnection, run: AgentRun, lines: list[str],
+    ):
         try:
             event = json.loads("\n".join(lines))
             if not isinstance(event, dict) or not isinstance(event.get("type"), str):
                 raise ValueError("Malformed AG-UI event")
+            if run.cancel_requested and event.get("type") == "RUN_FINISHED":
+                # The backend has accepted Stop. Ignore late success/approval
+                # snapshots that were already buffered on its SSE stream.
+                # No assistant answer or pending approval may be committed.
+                event = {
+                    "type": "RUN_FINISHED", "runId": run.run_id,
+                    "threadId": run.thread_id, "outcome": {"type": "cancelled"},
+                }
             if event.get("type") == "RUN_FINISHED":
                 outcome = event.get("outcome") or {}
                 if outcome.get("type") == "interrupt":

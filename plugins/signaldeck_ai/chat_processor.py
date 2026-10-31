@@ -113,6 +113,8 @@ class AGUIChatProcessor(DisplayProcessor):
             # The token is supplied only at runtime, never in config or
             # DisplayData. It is not returned or logged.
             return {"connection_id": self.runtime.verify_and_connect(kwargs.get("token"), view_key)}
+        if action == "cancel":
+            return {"run_id": self.runtime.cancel(identifier)}
         if action == "send":
             return {"run_id": self.runtime.start_message(identifier, kwargs.get("message"))}
         if action == "approve":
