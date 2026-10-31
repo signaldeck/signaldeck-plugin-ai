@@ -44,6 +44,7 @@ class AgentRun:
     interrupted: bool = False
     failed: bool = False
     cancel_requested: bool = False
+    cancelled: bool = False
     answer: str = ""
     _message_fragments: dict[str, str] = field(default_factory=dict, repr=False)
     changed: threading.Condition = field(default_factory=threading.Condition, repr=False)
@@ -67,6 +68,7 @@ class AgentRun:
                     self.answer += msg
             elif kind == "RUN_FINISHED":
                 self.interrupted = event.get("outcome", {}).get("type") == "interrupt"
+                self.cancelled = event.get("outcome", {}).get("type") == "cancelled"
                 self.done = True
             elif kind == "RUN_ERROR":
                 self.failed = True
@@ -320,6 +322,8 @@ class ChatRuntime:
                     json={"action": "cancel", "threadId": thread_id, "runId": run_id},
                 )
             if response.status_code != 202:
+                with self._lock:
+                    run.cancel_requested = False
                 raise ChatActionError(
                     f"Agent hat den Abbruch abgelehnt (HTTP {response.status_code})."
                 )
@@ -414,7 +418,7 @@ class ChatRuntime:
                         self._record_tool_activity(
                             connection, run, {"type": "RUN_ERROR"},
                         )
-                    if run.done and not run.failed:
+                    if run.done and not run.failed and not run.cancelled:
                         if run.answer and not run.interrupted:
                             connection.messages.append({
                                 "id": uuid.uuid4().hex,
