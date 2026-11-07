@@ -14,6 +14,7 @@ services:
       SIGNALDECK_DEBUG_AUTO_RELOAD: "false"
     volumes:
       - ./config:/config
+      - ./db:/app/db
       - ./logs:/app/logs
       - ./logging_config.json:/app/logging_config.json:ro
     # Host networking is intentional: cli-agent-api binds to 127.0.0.1.

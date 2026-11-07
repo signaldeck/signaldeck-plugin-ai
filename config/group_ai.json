@@ -61,5 +61,14 @@
     "value": [
       "haus"
     ]
+  },
+  {
+    "name": "Socket.IO – Privat",
+    "element": "Socket.IO Raum privat",
+    "type": "socketio",
+    "fa": "fas fa-calendar-alt",
+    "value": [
+      "privat"
+    ]
   }
 ]

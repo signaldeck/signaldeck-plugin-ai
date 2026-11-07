@@ -4,6 +4,16 @@
     "lang": "de",
     "lang_fallback": "en"
   },
+  "data_stores": [
+    {
+      "name": "sqlite_socketio",
+      "class": "signaldeck_plugin_sqlite.persistence.sqlite_store.SqliteStore",
+      "config": {
+        "url": "sqlite:////app/db/socketio.db",
+        "backup_name": "backup_socketio.sqlite"
+      }
+    }
+  ],
   "processors": [
     {
       "name": "dummy_temperature",
@@ -318,11 +328,29 @@
         "ping_interval": 25,
         "ping_timeout": 20,
         "max_http_buffer_size": 1000000,
+        "object_types": {
+          "appointment": {
+            "sync_days": null
+          }
+        },
         "rooms": [
           {
             "name": "haus",
             "display_name": "Haus / KI-Demo",
             "persist": false
+          },
+          {
+            "name": "privat",
+            "display_name": "Privat",
+            "persist": true,
+            "object_types": [
+              "appointment"
+            ]
+          }
+        ],
+        "persist": [
+          {
+            "type": "sqlite_socketio"
           }
         ],
         "incoming_message_routes": [

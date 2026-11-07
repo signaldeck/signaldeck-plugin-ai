@@ -45,6 +45,33 @@ While `signaldeck-plugin-main` [PR #7](https://github.com/signaldeck/signaldeck-
 
 The integration tests under `tests/test_demo_config.py` use the **real** DummyData and SDK ValueProvider, rather than a test-only replica. They verify current values, historical reads, the mock write action, and MCP tool discovery. An actual live Docker/cli-agent/AG-UI test still needs to be carried out on the target environment.
 
+## Socket.IO: private appointments (demo)
+
+The demo SignalDeck config enables two rooms:
+
+- `haus`: a **nonpersistent** chat/image room with the existing `@haus`
+  AI bridge. No appointment object type is enabled.
+- `privat`: a **persistent** chat/image room with the additional
+  `appointment` object type. Appointments sync without an age limit
+  (`sync_days: null`) and remain encrypted end-to-end when clients
+  have an active room key. No AI bridge or AI prefix is configured for
+  this room.
+
+The Socket.IO processor uses a dedicated `sqlite_socketio` datastore.
+The demo Compose setup mounts `./db:/app/db`, so records survive container
+rebuilds and restarts. Create the host `db` directory with permissions
+that allow the container user to write to it before starting Compose.
+
+The configuration is in `config/ai.json` (not embedded in the Python
+plugin wheel). The demo Dockerfile installs both
+`signaldeck-plugin-sqlite` and `signaldeck-plugin-socketio`; using a
+previously built image without these packages will not work.
+
+In the Android client, subscribe to the room **privat**. The server's
+`join_room` response advertises `appointment`, making the additional
+**Termine** tab available. Unknown or unconfigured rooms remain
+chat/image-only.
+
 ## Startup
 
 1. Start SignalDeck; its MCP servers start immediately, while the Chat
