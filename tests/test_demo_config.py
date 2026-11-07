@@ -165,6 +165,30 @@ def test_socketio_haus_demo_uses_real_merged_incoming_router():
     service.configure(cfg)
     assert service.incoming_router is not None
     assert service.room_settings("haus").persist is False
+    assert service.room_settings("privat").persist is True
+    assert service.room_object_types("privat") == ["appointment"]
+    assert service.room_object_types("haus") == []
+    assert service.room_object_types("unknown-room") == []
+    assert service.configured_object_types()["appointment"]["sync_days"] is None
+    assert service.room_client_config("privat") == {
+        "objectTypes": {"appointment": {"sync_days": None}},
+        "aiPrefixes": [],
+    }
+    assert service.room_client_config("haus") == {
+        "objectTypes": {},
+        "aiPrefixes": ["@haus"],
+    }
+    assert raw["data_stores"] == [{
+        "name": "sqlite_socketio",
+        "class": "signaldeck_plugin_sqlite.persistence.sqlite_store.SqliteStore",
+        "config": {
+            "url": "sqlite:////app/db/socketio.db",
+            "backup_name": "backup_socketio.sqlite",
+        },
+    }]
+    assert cfg["persist"] == [{"type": "sqlite_socketio"}]
+    assert any(item["type"] == "socketio" and item["value"] == ["privat"]
+               for item in group)
 
     messages = []
     class Context:
