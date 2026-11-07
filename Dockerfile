@@ -14,6 +14,8 @@ RUN pip install --no-cache-dir \
     "jsonschema>=4.26,<5" \
     "flask-socketio>=5.5,<6" \
     "simple-websocket>=1.1,<2" \
+    && pip install --no-cache-dir \
+        "git+https://github.com/signaldeck/signaldeck-plugin-sqlite.git@main" \
     && pip install --no-cache-dir --no-deps \
         "git+https://github.com/signaldeck/signaldeck-plugin-socketio.git@main" \
     && pip install --no-cache-dir --no-deps .
