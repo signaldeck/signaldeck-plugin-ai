@@ -5,6 +5,14 @@
     <button type="button" class="sdai-connect">Verbinden</button>
     <button type="button" class="sdai-new" title="Konversation und Agenten-Thread zurücksetzen, ohne sich abzumelden" disabled>Verlauf zurücksetzen</button>
   </div>
+  {% if displayData.has_socketio_bridge %}
+  <section class="sdai-socketio" aria-label="Socket.IO-Agent">
+    <div class="sdai-socketio-heading"><strong>Socket.IO-Agent</strong><span class="sdai-socketio-count">Nicht verbunden</span></div>
+    <div class="sdai-socketio-active"></div>
+    <ul class="sdai-socketio-waiting"></ul>
+    <div class="sdai-socketio-feedback" role="status" aria-live="polite"></div>
+  </section>
+  {% endif %}
   <div class="sdai-transcript" role="log" aria-live="polite"></div>
   <form class="sdai-form">
     <input class="sdai-input" type="text" aria-label="Nachricht" placeholder="Nachricht..." disabled maxlength="12000">
