@@ -70,9 +70,9 @@ class SocketIOChatBridge:
         max_queue = config.get("max_queue", 5)
         if type(max_queue) is not int or not 0 <= max_queue <= 100:
             raise ValueError("socketio_bridge.max_queue must be 0..100")
-        timeout = config.get("timeout_seconds", 120)
-        if type(timeout) is not int or not 1 <= timeout <= 600:
-            raise ValueError("socketio_bridge.timeout_seconds must be 1..600")
+        timeout = config.get("timeout_seconds", 1200)
+        if type(timeout) is not int or not 1 <= timeout <= 1200:
+            raise ValueError("socketio_bridge.timeout_seconds must be 1..1200")
 
         self.ctx = ctx
         self.runtime = runtime
