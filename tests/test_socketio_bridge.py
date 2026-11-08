@@ -368,3 +368,133 @@ def test_stop_before_upstream_run_ids_still_cancels_once_available(monkeypatch):
     finally:
         allow_registration.set()
         bridge.shutdown()
+
+
+
+def test_cancelling_waiting_job_immediately_releases_full_queue_slot():
+    ctx, rt = Context(), runtime()
+    cfg = config()
+    cfg["max_queue"] = 1
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    async def ask(prompt, token):
+        calls.append(prompt)
+        if prompt == "active":
+            started.set()
+            await asyncio.to_thread(release.wait, 2)
+        return "Antwort: " + prompt
+
+    bridge = SocketIOChatBridge(cfg, ctx, rt, ask=ask)
+    try:
+        send(ctx, event_id="run", prompt="active")
+        assert started.wait(2)
+        send(ctx, event_id="queued", prompt="old queued")
+        assert bridge.status()["waiting_count"] == 1
+        send(ctx, event_id="overflow", prompt="should be rejected")
+        assert any("ausgelastet" in m[1] for m in ctx.sent)
+
+        assert bridge.cancel(request_id="queued") == "Wartende Anfrage abgebrochen."
+        assert bridge.status()["waiting_count"] == 0
+        send(ctx, event_id="replacement", prompt="new queued")
+        assert [w["id"] for w in bridge.status()["waiting"]] == ["replacement"]
+        release.set()
+        wait_for(lambda: any(m[1] == "Antwort: new queued" for m in ctx.sent))
+        assert calls == ["active", "new queued"]
+    finally:
+        release.set()
+        bridge.shutdown()
+
+
+def test_failed_upstream_stop_can_retry_and_keep_original_answer(monkeypatch):
+    import httpx
+
+    ctx, rt = Context(), runtime()
+    started, release = threading.Event(), threading.Event()
+    called = threading.Event()
+    attempts = []
+
+    async def fake_ask(prompt, token, *, stop_event=None, on_started=None):
+        on_started("thread-1", "run-1")
+        started.set()
+        await asyncio.to_thread(release.wait, 2)
+        return "Original answer"
+
+    class FakeClient:
+        def __init__(self, timeout):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def post(self, endpoint, *, headers, json):
+            attempts.append(json)
+            called.set()
+            return httpx.Response(503 if len(attempts) == 1 else 202)
+
+    monkeypatch.setattr("signaldeck_ai.socketio_bridge.httpx.Client", FakeClient)
+    bridge = SocketIOChatBridge(config(), ctx, rt)
+    bridge._command._ask_once = fake_ask
+    try:
+        send(ctx, event_id="original", prompt="work")
+        assert started.wait(2)
+        send(ctx, event_id="stop1", prompt="stop")
+        assert called.wait(2)
+        wait_for(lambda: bridge.status()["active"]["cancel_error"] is not None)
+        failed = bridge.status()["active"]
+        assert failed["cancelling"] is False
+        assert "nicht bestätigt" in failed["cancel_error"]
+        send(ctx, event_id="stop2", prompt="stop")
+        wait_for(lambda: len(attempts) == 2)
+        wait_for(lambda: bridge.status()["active"]["cancelling"])
+        release.set()
+        wait_for(lambda: any(m[1] == "Anfrage abgebrochen." for m in ctx.sent))
+        assert not any(m[1] == "Original answer" for m in ctx.sent)
+    finally:
+        release.set()
+        bridge.shutdown()
+
+
+def test_failed_cancel_does_not_discard_normal_success_when_not_retried(monkeypatch):
+    import httpx
+
+    ctx, rt = Context(), runtime()
+    started, release = threading.Event(), threading.Event()
+
+    async def fake_ask(prompt, token, *, stop_event=None, on_started=None):
+        on_started("thread-2", "run-2")
+        started.set()
+        await asyncio.to_thread(release.wait, 2)
+        return "Actual answer"
+
+    class FakeClient:
+        def __init__(self, timeout):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def post(self, endpoint, *, headers, json):
+            return httpx.Response(503)
+
+    monkeypatch.setattr("signaldeck_ai.socketio_bridge.httpx.Client", FakeClient)
+    bridge = SocketIOChatBridge(config(), ctx, rt)
+    bridge._command._ask_once = fake_ask
+    try:
+        send(ctx, event_id="request", prompt="test")
+        assert started.wait(2)
+        send(ctx, event_id="stop-control", prompt="stop")
+        wait_for(lambda: bridge.status()["active"]["cancel_error"] is not None)
+        assert bridge.status()["active"]["cancelling"] is False
+        release.set()
+        wait_for(lambda: any(m[1] == "Actual answer" for m in ctx.sent))
+    finally:
+        release.set()
+        bridge.shutdown()
