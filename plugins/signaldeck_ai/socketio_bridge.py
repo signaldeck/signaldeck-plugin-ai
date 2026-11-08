@@ -171,7 +171,10 @@ class SocketIOChatBridge:
                 request_id is None or item.request_id == request_id
             ):
                 if item.cancel_requested:
-                    return "Abbruch bereits angefordert."
+                    if item.cancel_error is None:
+                        return "Abbruch bereits angefordert."
+                    # A failed upstream request may be retried while the run is active.
+                    item.cancel_error = None
                 item.cancel_requested = True
                 # The injected test adapter has no upstream AG-UI run.
                 if self._ask is not None:
