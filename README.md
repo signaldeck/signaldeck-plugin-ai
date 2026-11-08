@@ -126,10 +126,14 @@ normal client validation; the AI plugin has no direct Socket.IO dependency.
        "response_source": "ai.socketio.haus"}
     ],
     "max_queue": 5,
-    "timeout_seconds": 120
+    "timeout_seconds": 1200
   }
 }
 ```
+
+Both one-shot entry points (`LLM` Cmd and Socket.IO bridge) default to a
+1200-second (20-minute) timeout and accept values from 1 to 1200 seconds.
+An explicitly configured `timeout_seconds` takes precedence over the default.
 
 This configuration belongs in the `AGUIChatProcessor.config`. The Socket.IO
 plugin must configure its corresponding inbound route:
@@ -214,7 +218,7 @@ configuration:
   "class": "signaldeck_ai.chat_processor.AGUIChatProcessor",
   "config": {
     "endpoint": "http://127.0.0.1:8765/ag-ui",
-    "cmd": {"name": "LLM", "timeout_seconds": 120}
+    "cmd": {"name": "LLM", "timeout_seconds": 1200}
   }
 }
 ```
@@ -246,8 +250,8 @@ consumed to completion; interactive approval interrupts and frontend tool
 handoffs fail rather than being auto-approved. An attempted
 `DELETE /threads/{threadId}` in a `finally` block closes the temporary
 MCP-owning cli-agent session on success, failure or timeout. Deletion
-errors are logged. The command times out after 120 seconds by default,
-configurable from 1 to 600 seconds. Commands have no shared conversation
+errors are logged. The command times out after 1200 seconds (20 minutes) by default,
+configurable from 1 to 1200 seconds. Commands have no shared conversation
 history across invocations.
 
 The demo registers `LLM` on its existing `agui` processor. This is a
