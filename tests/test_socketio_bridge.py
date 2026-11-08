@@ -173,10 +173,26 @@ def test_bad_config_fails_closed_before_subscribing():
         {}, {"routes": []}, {"routes": [{"room": "haus"}]},
         {"routes": config()["routes"], "max_queue": -1},
         {"routes": config()["routes"], "timeout_seconds": 0},
+        {"routes": config()["routes"], "timeout_seconds": 1201},
     ]:
         with pytest.raises(ValueError):
             SocketIOChatBridge(bad, ctx, rt)
     assert ctx.message_bus.listeners == []
+
+
+def test_bridge_default_and_explicit_timeouts_are_1200_seconds():
+    ctx, rt = Context(), runtime()
+    for timeout in (None, 1200):
+        cfg = config()
+        if timeout is None:
+            cfg.pop("timeout_seconds")
+        else:
+            cfg["timeout_seconds"] = timeout
+        bridge = SocketIOChatBridge(cfg, ctx, rt)
+        try:
+            assert bridge._command.timeout_seconds == 1200
+        finally:
+            bridge.shutdown()
 
 
 def test_zero_queue_rejects_parallel_requests_without_second_session():

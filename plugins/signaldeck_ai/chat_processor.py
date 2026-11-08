@@ -63,7 +63,7 @@ class AGUIChatProcessor(DisplayProcessor):
             raise ValueError(f"Cmd '{name}' already registered by another processor")
         cmd.registerCmd(LLMCommand(
             name, self.runtime,
-            timeout_seconds=config.get("timeout_seconds", 120),
+            timeout_seconds=config.get("timeout_seconds", 1200),
         ))
 
     def getTemplate(self, value):

@@ -173,10 +173,14 @@ def test_socketio_haus_demo_uses_real_merged_incoming_router():
     assert service.room_client_config("privat") == {
         "objectTypes": {"appointment": {"sync_days": None}},
         "aiPrefixes": [],
+        "displayName": "Privat",
+        "persistent": True,
     }
     assert service.room_client_config("haus") == {
         "objectTypes": {},
         "aiPrefixes": ["@haus"],
+        "displayName": "Haus / KI-Demo",
+        "persistent": False,
     }
     assert raw["data_stores"] == [{
         "name": "sqlite_socketio",

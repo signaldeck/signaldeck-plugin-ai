@@ -84,6 +84,7 @@ def test_multiple_processors_register_distinct_commands_without_singleton():
     a.registerCommands(cmd)
     b.registerCommands(cmd)
     assert cmd.commands["LLM"].runtime is a.runtime
+    assert cmd.commands["LLM"].timeout_seconds == 1200
     assert cmd.commands["LLM_lokal"].runtime is b.runtime
     with pytest.raises(ValueError, match="already registered"):
         a.registerCommands(cmd)
@@ -94,6 +95,7 @@ def test_multiple_processors_register_distinct_commands_without_singleton():
 def test_rejects_invalid_command_config_or_timeout():
     for value in [
         {"name": "echo"}, {"name": "a b"}, {"name": "LLM", "timeout_seconds": 0},
+        {"name": "LLM", "timeout_seconds": 1201},
         {"name": "LLM", "token_env": "ENV"},
     ]:
         processor = AGUIChatProcessor("a", {
@@ -102,6 +104,14 @@ def test_rejects_invalid_command_config_or_timeout():
         with pytest.raises(ValueError):
             processor.registerCommands(Cmd())
         processor.shutdown()
+
+
+def test_command_accepts_1200_seconds_and_rejects_higher_values():
+    runtime = ChatRuntime("http://127.0.0.1:8765/ag-ui")
+    assert LLMCommand("LLM", runtime).timeout_seconds == 1200
+    assert LLMCommand("LLM", runtime, timeout_seconds=1200).timeout_seconds == 1200
+    with pytest.raises(ValueError, match="between 1 and 1200"):
+        LLMCommand("LLM", runtime, timeout_seconds=1201)
 
 
 def test_command_response_is_logged_and_temp_thread_deleted():

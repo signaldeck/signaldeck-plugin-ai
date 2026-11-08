@@ -300,7 +300,7 @@
         "endpoint": "http://127.0.0.1:8765/ag-ui",
         "cmd": {
           "name": "LLM",
-          "timeout_seconds": 120
+          "timeout_seconds": 1200
         },
         "socketio_bridge": {
           "routes": [
@@ -311,7 +311,7 @@
             }
           ],
           "max_queue": 5,
-          "timeout_seconds": 120
+          "timeout_seconds": 1200
         }
       }
     },
