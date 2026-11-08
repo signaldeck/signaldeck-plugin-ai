@@ -198,3 +198,18 @@ def test_stopping_before_run_skips_http():
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(command.run("Stop", stopEvent=stop))
     assert not requests
+
+
+def test_one_shot_exposes_run_identity_after_successful_http_start():
+    runtime, _ = connected_runtime()
+    factory, requests = client_factory()
+    command = LLMCommand("LLM", runtime, async_client_factory=factory)
+    identities = []
+    output = asyncio.run(command._ask_once(
+        "Hallo", "test-secret", on_started=lambda thread_id, run_id:
+        identities.append((thread_id, run_id)),
+    ))
+    assert output == "Erste Antwort"
+    assert len(identities) == 1
+    payload = json.loads(next(r.content for r in requests if r.method == "POST"))
+    assert identities[0] == (payload["threadId"], payload["runId"])
