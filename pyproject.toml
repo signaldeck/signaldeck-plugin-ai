@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "signaldeck-plugin-ai"
-version = "0.6.4"
+version = "0.6.5"
 description = "SignalDeck MCP and AG-UI integration"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-  "signaldeck-sdk>=0.6.1",
+  "signaldeck-sdk>=0.6.3",
   "flask>=3.0",
   "mcp>=1.30,<2",
   "uvicorn>=0.35,<1",
