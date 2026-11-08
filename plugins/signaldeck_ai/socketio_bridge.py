@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import queue
 import threading
 from collections import deque
 from collections.abc import Mapping
@@ -77,11 +76,13 @@ class SocketIOChatBridge:
         self.ctx = ctx
         self.runtime = runtime
         self._slots = threading.BoundedSemaphore(max_queue + 1)
-        self._queue: queue.Queue[BridgeRequest] = queue.Queue(maxsize=max_queue + 1)
         self._stopped = threading.Event()
         self._guard = threading.RLock()
+        # A bounded deque allows a cancelled waiting request to free its
+        # capacity immediately, without racing the worker's dequeue.
+        self._queue: deque[BridgeRequest] = deque()
+        self._queue_ready = threading.Condition(self._guard)
         self._active: BridgeRequest | None = None
-        self._waiting: dict[str, BridgeRequest] = {}
         self._seen: set[tuple[str, str]] = set()
         self._seen_order: deque[tuple[str, str]] = deque()
         self._ask = ask
@@ -108,8 +109,8 @@ class SocketIOChatBridge:
             waiting = [
                 {"id": item.request_id, "room": item.room,
                  "prompt": item.prompt[:160]}
-                for item in self._waiting.values()
-                if not item.cancelled and (room is None or item.room == room)
+                for item in self._queue
+                if room is None or item.room == room
             ]
             return {
                 "active": ({
@@ -117,6 +118,7 @@ class SocketIOChatBridge:
                     "room": active.room,
                     "prompt": active.prompt[:160],
                     "cancelling": active.cancel_requested,
+                    "cancel_error": active.cancel_error,
                 } if active is not None else None),
                 "waiting": waiting,
                 "waiting_count": len(waiting),
@@ -139,6 +141,7 @@ class SocketIOChatBridge:
             _LOG.exception("Socket.IO cancellation failed (request=%s)", item.request_id)
             with self._guard:
                 item.cancel_error = "Der Agent hat den Abbruch nicht bestätigt."
+                item.cancel_requested = False
                 item.cancel_started = False
             return
         with self._guard:
@@ -171,10 +174,8 @@ class SocketIOChatBridge:
                 request_id is None or item.request_id == request_id
             ):
                 if item.cancel_requested:
-                    if item.cancel_error is None:
-                        return "Abbruch bereits angefordert."
-                    # A failed upstream request may be retried while the run is active.
-                    item.cancel_error = None
+                    return "Abbruch bereits angefordert."
+                item.cancel_error = None
                 item.cancel_requested = True
                 # The injected test adapter has no upstream AG-UI run.
                 if self._ask is not None:
@@ -184,11 +185,15 @@ class SocketIOChatBridge:
                     self._start_cancel_locked(item)
                 return "Abbruch angefordert."
             if request_id is not None:
-                item = self._waiting.get(request_id)
-                if item is not None and (room is None or item.room == room):
-                    item.cancelled = True
-                    self._waiting.pop(request_id, None)
-                    return "Wartende Anfrage abgebrochen."
+                for index, pending in enumerate(self._queue):
+                    if pending.request_id == request_id and (
+                        room is None or pending.room == room
+                    ):
+                        # Guard also protects dequeuing. The worker cannot
+                        # acquire this request or release its slot twice.
+                        del self._queue[index]
+                        self._slots.release()
+                        return "Wartende Anfrage abgebrochen."
             return "Keine passende laufende Anfrage vorhanden."
 
     def on_message(self, message: Any) -> None:
@@ -223,7 +228,9 @@ class SocketIOChatBridge:
                 state = self.status(room)
                 active = state["active"]
                 description = (
-                    ("Abbruch läuft" if active["cancelling"] else "Eine Anfrage läuft")
+                    ("Abbruch fehlgeschlagen; Anfrage läuft" if active["cancel_error"]
+                     else "Abbruch läuft" if active["cancelling"]
+                     else "Eine Anfrage läuft")
                     if active else "Keine Anfrage läuft"
                 )
                 self._publish(
@@ -240,30 +247,19 @@ class SocketIOChatBridge:
                 )
                 return
             item = BridgeRequest(event_id, response_source, room, prompt)
-            self._waiting[event_id] = item
-            try:
-                self._queue.put_nowait(item)
-            except queue.Full:
-                self._waiting.pop(event_id, None)
-                self._slots.release()
-                self._publish(
-                    response_source,
-                    "Der Haus-Assistent ist ausgelastet. Bitte später erneut versuchen.",
-                    room,
-                )
+            self._queue.append(item)
+            self._queue_ready.notify()
 
     def _run(self) -> None:
-        while not self._stopped.is_set():
+        while True:
+            with self._queue_ready:
+                while not self._queue and not self._stopped.is_set():
+                    self._queue_ready.wait()
+                if self._stopped.is_set():
+                    return
+                item = self._queue.popleft()
+                self._active = item
             try:
-                item = self._queue.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            try:
-                with self._guard:
-                    self._waiting.pop(item.request_id, None)
-                    if self._stopped.is_set() or item.cancelled:
-                        continue
-                    self._active = item
                 answer = None
                 try:
                     token = self.runtime.command_token()
@@ -301,13 +297,16 @@ class SocketIOChatBridge:
                     if self._active is item:
                         self._active = None
                     item.token = None
-                self._queue.task_done()
                 self._slots.release()
 
     def shutdown(self) -> None:
-        with self._guard:
+        with self._queue_ready:
             self._stopped.set()
             self._unsubscribe()
             if self._active is not None:
                 self._active.stop_event.set()
+            while self._queue:
+                self._queue.popleft()
+                self._slots.release()
+            self._queue_ready.notify_all()
         self._worker.join(timeout=2.0)
