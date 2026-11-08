@@ -498,3 +498,110 @@ def test_failed_cancel_does_not_discard_normal_success_when_not_retried(monkeypa
     finally:
         release.set()
         bridge.shutdown()
+
+
+
+def test_successful_run_waits_for_rejected_cancel_before_publishing(monkeypatch):
+    """A late HTTP 503 must not replace an already successful agent answer."""
+    import httpx
+
+    ctx, rt = Context(), runtime()
+    run_started = threading.Event()
+    run_release = threading.Event()
+    cancel_started = threading.Event()
+    cancel_release = threading.Event()
+    calls = []
+
+    async def fake_ask(prompt, token, *, stop_event=None, on_started=None):
+        on_started("thread-race", "run-race")
+        run_started.set()
+        await asyncio.to_thread(run_release.wait, 2)
+        return "Real completed answer"
+
+    class FakeClient:
+        def __init__(self, timeout):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def post(self, endpoint, *, headers, json):
+            calls.append(json)
+            cancel_started.set()
+            assert cancel_release.wait(2)
+            return httpx.Response(503)
+
+    monkeypatch.setattr("signaldeck_ai.socketio_bridge.httpx.Client", FakeClient)
+    bridge = SocketIOChatBridge(config(), ctx, rt)
+    bridge._command._ask_once = fake_ask
+    try:
+        send(ctx, event_id="run-race-id", prompt="analyze")
+        assert run_started.wait(2)
+        send(ctx, event_id="cancel-race-id", prompt="stop")
+        assert cancel_started.wait(2)
+        run_release.set()
+        # The backend has completed, but the cancellation result is pending.
+        # The worker must not emit the misleading "not confirmed" fallback.
+        wait_for(lambda: bridge.status()["active"] is not None)
+        assert not any(m[1] == "Real completed answer" for m in ctx.sent)
+        assert not any("Anfrage beendet" in m[1] for m in ctx.sent)
+        cancel_release.set()
+        wait_for(lambda: any(m[1] == "Real completed answer" for m in ctx.sent))
+        assert not any("Anfrage beendet" in m[1] for m in ctx.sent)
+        assert calls == [{
+            "action": "cancel", "threadId": "thread-race", "runId": "run-race",
+        }]
+    finally:
+        cancel_release.set()
+        run_release.set()
+        bridge.shutdown()
+
+
+def test_successful_run_waits_for_accepted_cancel_before_publishing(monkeypatch):
+    import httpx
+
+    ctx, rt = Context(), runtime()
+    run_started, run_release = threading.Event(), threading.Event()
+    cancel_started, cancel_release = threading.Event(), threading.Event()
+
+    async def fake_ask(prompt, token, *, stop_event=None, on_started=None):
+        on_started("thread-success", "run-success")
+        run_started.set()
+        await asyncio.to_thread(run_release.wait, 2)
+        return "Result must be suppressed"
+
+    class FakeClient:
+        def __init__(self, timeout):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def post(self, endpoint, *, headers, json):
+            cancel_started.set()
+            assert cancel_release.wait(2)
+            return httpx.Response(202)
+
+    monkeypatch.setattr("signaldeck_ai.socketio_bridge.httpx.Client", FakeClient)
+    bridge = SocketIOChatBridge(config(), ctx, rt)
+    bridge._command._ask_once = fake_ask
+    try:
+        send(ctx, event_id="request-success", prompt="analyze")
+        assert run_started.wait(2)
+        send(ctx, event_id="stop-success", prompt="stop")
+        assert cancel_started.wait(2)
+        run_release.set()
+        assert not any("Result must be suppressed" in m[1] for m in ctx.sent)
+        cancel_release.set()
+        wait_for(lambda: any(m[1] == "Anfrage abgebrochen." for m in ctx.sent))
+        assert not any("Result must be suppressed" in m[1] for m in ctx.sent)
+    finally:
+        cancel_release.set()
+        run_release.set()
+        bridge.shutdown()
