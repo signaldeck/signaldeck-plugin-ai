@@ -18,6 +18,11 @@
     const approvals = root.querySelector(".sdai-approval");
     const approvalText = root.querySelector(".sdai-approval-text");
     const form = root.querySelector(".sdai-form");
+    const socketIO = root.querySelector(".sdai-socketio");
+    const socketCount = socketIO?.querySelector(".sdai-socketio-count");
+    const socketActive = socketIO?.querySelector(".sdai-socketio-active");
+    const socketWaiting = socketIO?.querySelector(".sdai-socketio-waiting");
+    const socketFeedback = socketIO?.querySelector(".sdai-socketio-feedback");
     let connectionId = null, busy = false, remoteBusy = false, interrupt = null;
     let lastMessages = null, refreshing = false;
     const assistantMarkdown = new WeakMap();
@@ -237,6 +242,51 @@
       return result;
     }
 
+
+    function renderSocketIO(snapshot) {
+      if (!socketIO) return;
+      socketActive.replaceChildren();
+      socketWaiting.replaceChildren();
+      if (!connectionId) {
+        socketCount.textContent = "Nicht verbunden";
+        return;
+      }
+      const active = snapshot?.active;
+      const waiting = Array.isArray(snapshot?.waiting) ? snapshot.waiting : [];
+      socketCount.textContent = waiting.length + " wartend";
+      if (active) {
+        const row = document.createElement("div");
+        row.className = "sdai-socketio-run";
+        const label = document.createElement("span");
+        label.textContent = (active.cancelling ? "Abbruch läuft: " : "Läuft: ") +
+          (active.prompt || "Anfrage") + " (" + active.room + ")";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Stop";
+        button.disabled = Boolean(active.cancelling);
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            const response = await action("socketio_cancel", {request_id: active.id});
+            socketFeedback.textContent = response.message || "Abbruch angefordert.";
+          } catch (error) {
+            socketFeedback.textContent = String(error.message || error);
+            button.disabled = false;
+          }
+          void syncState();
+        });
+        row.append(label, button);
+        socketActive.append(row);
+      } else {
+        socketActive.textContent = "Keine Anfrage läuft.";
+      }
+      for (const item of waiting) {
+        const node = document.createElement("li");
+        node.textContent = item.prompt + " (" + item.room + ")";
+        socketWaiting.append(node);
+      }
+    }
+
     async function syncState() {
       // SignalDeck has no browser user sessions. All browsers opening the same
       // configured view value intentionally share a server-side agent thread.
@@ -277,6 +327,14 @@
           approvals.hidden = true;
         }
         updateUI();
+        if (socketIO) {
+          if (connectionId) {
+            const snapshot = await action("socketio_status");
+            renderSocketIO(snapshot.socketio);
+          } else {
+            renderSocketIO(null);
+          }
+        }
       } catch (error) {
         // The next poll can recover after a transient /run failure.
       } finally {
