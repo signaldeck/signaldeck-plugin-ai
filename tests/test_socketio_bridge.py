@@ -207,3 +207,164 @@ def test_zero_queue_rejects_parallel_requests_without_second_session():
     finally:
         release.set()
         bridge.shutdown()
+
+
+def test_stop_and_status_bypass_queue_and_suppress_late_answer():
+    ctx, rt = Context(), runtime()
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    async def ask(prompt, token):
+        calls.append(prompt)
+        if prompt == "first":
+            started.set()
+            await asyncio.to_thread(release.wait, 2)
+            return "Stale response"
+        return "Second complete"
+
+    bridge = SocketIOChatBridge(config(), ctx, rt, ask=ask)
+    try:
+        send(ctx, prompt="first", event_id="first-id")
+        assert started.wait(2)
+        send(ctx, prompt="second", event_id="second-id")
+        snapshot = bridge.status("haus")
+        assert snapshot["active"]["id"] == "first-id"
+        assert snapshot["waiting_count"] == 1
+        send(ctx, prompt="status", event_id="status-id")
+        assert "1 weitere Anfragen warten" in ctx.sent[-1][1]
+        send(ctx, prompt="stop", event_id="stop-id")
+        assert "Abbruch angefordert" in ctx.sent[-1][1]
+        assert bridge.status("haus")["active"]["cancelling"] is True
+        send(ctx, prompt="stop", event_id="stop-id")  # replay cannot cancel another run
+        release.set()
+        wait_for(lambda: any(m[1] == "Second complete" for m in ctx.sent))
+        assert any(m[1] == "Anfrage abgebrochen." for m in ctx.sent)
+        assert not any("Stale response" in m[1] for m in ctx.sent)
+        assert calls == ["first", "second"]
+    finally:
+        release.set()
+        bridge.shutdown()
+
+
+def test_waiting_request_can_be_cancelled_by_id_without_execution():
+    ctx, rt = Context(), runtime()
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    async def ask(prompt, token):
+        calls.append(prompt)
+        started.set()
+        await asyncio.to_thread(release.wait, 2)
+        return "done"
+
+    bridge = SocketIOChatBridge(config(), ctx, rt, ask=ask)
+    try:
+        send(ctx, prompt="first", event_id="first-id")
+        assert started.wait(2)
+        send(ctx, prompt="cancel this", event_id="queued-id")
+        assert bridge.status()["waiting_count"] == 1
+        assert bridge.cancel(request_id="queued-id") == "Wartende Anfrage abgebrochen."
+        assert bridge.status()["waiting_count"] == 0
+        release.set()
+        wait_for(lambda: len(ctx.sent) == 1)
+        assert calls == ["first"]
+    finally:
+        release.set()
+        bridge.shutdown()
+
+
+def test_real_backend_cancel_targets_only_current_run(monkeypatch):
+    import json
+    import httpx
+
+    ctx, rt = Context(), runtime()
+    started = threading.Event()
+    requests = []
+
+    async def fake_ask(prompt, token, *, stop_event=None, on_started=None):
+        assert token == "secret"
+        on_started("thread-123", "run-456")
+        started.set()
+        assert await asyncio.to_thread(stop_event.wait, 2)
+        raise asyncio.CancelledError()
+
+    class FakeClient:
+        def __init__(self, timeout):
+            assert timeout == 8.0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def post(self, endpoint, *, headers, json):
+            requests.append((endpoint, headers, json))
+            return httpx.Response(202)
+
+    monkeypatch.setattr("signaldeck_ai.socketio_bridge.httpx.Client", FakeClient)
+    bridge = SocketIOChatBridge(config(), ctx, rt)
+    bridge._command._ask_once = fake_ask
+    try:
+        send(ctx, prompt="diagnose", event_id="abc")
+        assert started.wait(2)
+        send(ctx, prompt="stop", event_id="control")
+        wait_for(lambda: any(m[1] == "Anfrage abgebrochen." for m in ctx.sent))
+        assert len(requests) == 1
+        endpoint, headers, payload = requests[0]
+        assert endpoint == "http://127.0.0.1:8765/ag-ui"
+        assert headers["Authorization"] == "Bearer secret"
+        assert payload == {
+            "action": "cancel", "threadId": "thread-123", "runId": "run-456",
+        }
+        assert bridge.status()["active"] is None
+    finally:
+        bridge.shutdown()
+
+
+def test_stop_before_upstream_run_ids_still_cancels_once_available(monkeypatch):
+    import httpx
+
+    ctx, rt = Context(), runtime()
+    before_registration = threading.Event()
+    allow_registration = threading.Event()
+    requests = []
+
+    async def fake_ask(prompt, token, *, stop_event=None, on_started=None):
+        before_registration.set()
+        await asyncio.to_thread(allow_registration.wait, 2)
+        on_started("late-thread", "late-run")
+        assert await asyncio.to_thread(stop_event.wait, 2)
+        raise asyncio.CancelledError()
+
+    class FakeClient:
+        def __init__(self, timeout):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def post(self, endpoint, *, headers, json):
+            requests.append(json)
+            return httpx.Response(202)
+
+    monkeypatch.setattr("signaldeck_ai.socketio_bridge.httpx.Client", FakeClient)
+    bridge = SocketIOChatBridge(config(), ctx, rt)
+    bridge._command._ask_once = fake_ask
+    try:
+        send(ctx, prompt="diagnose", event_id="initial")
+        assert before_registration.wait(2)
+        send(ctx, prompt="stop", event_id="stop-control")
+        assert bridge.status()["active"]["cancelling"]
+        allow_registration.set()
+        wait_for(lambda: any(m[1] == "Anfrage abgebrochen." for m in ctx.sent))
+        assert requests == [{
+            "action": "cancel", "threadId": "late-thread", "runId": "late-run",
+        }]
+    finally:
+        allow_registration.set()
+        bridge.shutdown()
