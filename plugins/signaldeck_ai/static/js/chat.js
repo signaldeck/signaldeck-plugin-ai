@@ -258,8 +258,10 @@
         const row = document.createElement("div");
         row.className = "sdai-socketio-run";
         const label = document.createElement("span");
-        label.textContent = (active.cancelling ? "Abbruch läuft: " : "Läuft: ") +
+        label.textContent = (active.cancel_error ? "Abbruch fehlgeschlagen: " :
+          active.cancelling ? "Abbruch läuft: " : "Läuft: ") +
           (active.prompt || "Anfrage") + " (" + active.room + ")";
+        if (active.cancel_error) socketFeedback.textContent = active.cancel_error;
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = "Stop";
