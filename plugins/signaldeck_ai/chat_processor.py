@@ -16,6 +16,7 @@ class ChatDisplayData(DisplayData):
         self.name = processor.name
         self.api_base = f"/plugin/ai/api/chat/{processor.name}"
         self.view_key = processor.runtime.normalize_view(value)
+        self.has_socketio_bridge = processor.socketio_bridge is not None
 
 
 class AGUIChatProcessor(DisplayProcessor):
@@ -113,6 +114,18 @@ class AGUIChatProcessor(DisplayProcessor):
             # The token is supplied only at runtime, never in config or
             # DisplayData. It is not returned or logged.
             return {"connection_id": self.runtime.verify_and_connect(kwargs.get("token"), view_key)}
+        if action == "socketio_status":
+            if self.socketio_bridge is None:
+                raise ChatActionError("Socket.IO-Bridge ist nicht konfiguriert.")
+            return {"socketio": self.socketio_bridge.status()}
+        if action == "socketio_cancel":
+            if self.socketio_bridge is None:
+                raise ChatActionError("Socket.IO-Bridge ist nicht konfiguriert.")
+            requested = kwargs.get("request_id")
+            if requested is not None and (not isinstance(requested, str)
+                                          or not 0 < len(requested) <= 256):
+                raise ChatActionError("Ungültige Socket.IO-Anfragekennung.")
+            return {"message": self.socketio_bridge.cancel(request_id=requested)}
         if action == "cancel":
             return {"run_id": self.runtime.cancel(identifier)}
         if action == "send":

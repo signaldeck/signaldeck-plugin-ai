@@ -41,3 +41,12 @@
 .sdai-download { padding: 0.5rem 0; }
 .sdai-download-button { cursor: pointer; padding: .55rem .8rem; border-radius: .4rem; }
 .sdai-download-button:disabled { opacity: .55; cursor: wait; }
+
+.sdai-socketio{border:1px solid var(--border-color,#9997);border-radius:7px;padding:10px;margin:10px 0;background:#8881}
+.sdai-socketio-heading,.sdai-socketio-run{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.sdai-socketio-count,.sdai-socketio-feedback{font-size:.85em;opacity:.8}
+.sdai-socketio-active{margin-top:7px}
+.sdai-socketio-run span{min-width:0;overflow-wrap:anywhere}
+.sdai-socketio-waiting{font-size:.85em;margin:7px 0 0;padding-left:20px;overflow-wrap:anywhere}
+.sdai-socketio-waiting:empty{display:none}
+.sdai-socketio-feedback:empty{display:none}

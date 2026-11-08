@@ -567,3 +567,59 @@ def test_cancel_rejected_does_not_discard_terminal_result():
         "type": "RUN_FINISHED", "outcome": {"type": "success"},
     })])
     assert run.done and not run.cancelled
+
+
+def test_socketio_actions_require_view_and_use_bridge_status(monkeypatch):
+    processor = make_processor()
+    bridge = SimpleNamespace(
+        status=lambda: {
+            "active": {"id": "request-1", "room": "haus", "prompt": "Analysiere",
+                       "cancelling": False},
+            "waiting": [], "waiting_count": 0,
+        },
+        cancel=lambda **kwargs: "Abbruch angefordert.",
+    )
+    processor.socketio_bridge = bridge
+    monkeypatch.setattr(processor.runtime, "assert_view",
+                        lambda view, identifier: None
+                        if identifier == "authorized" else
+                        (_ for _ in ()).throw(ChatActionError("Unauthorized")))
+    app = Flask(__name__)
+    with app.test_request_context(
+        "/run", method="POST", headers={"Origin": "http://localhost"},
+    ):
+        state = processor.process(
+            "energie", "hash", ai_action="socketio_status",
+            connection_id="authorized",
+        )
+        assert state["ok"] and state["socketio"]["active"]["id"] == "request-1"
+        cancel = processor.process(
+            "energie", "hash", ai_action="socketio_cancel",
+            connection_id="authorized", request_id="request-1",
+        )
+        assert cancel == {"ok": True, "message": "Abbruch angefordert."}
+        denied = processor.process(
+            "energie", "hash", ai_action="socketio_cancel",
+            connection_id="wrong", request_id="request-1",
+        )
+        assert denied["ok"] is False
+        invalid = processor.process(
+            "energie", "hash", ai_action="socketio_cancel",
+            connection_id="authorized", request_id=["bad"],
+        )
+        assert invalid["ok"] is False
+    processor.socketio_bridge = None
+    processor.shutdown()
+
+
+def test_socketio_ui_has_independent_stop_and_status_controls():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "plugins/signaldeck_ai/templates/ai/chat.html").read_text()
+    script = (root / "plugins/signaldeck_ai/static/js/chat.js").read_text()
+    assert "displayData.has_socketio_bridge" in template
+    assert "sdai-socketio-active" in template
+    assert 'action("socketio_status")' in script
+    assert 'action("socketio_cancel", {request_id: active.id})' in script
+    assert 'action("cancel")' in script  # existing chat stop unchanged

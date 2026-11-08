@@ -58,7 +58,7 @@ class LLMCommand(Command):
         if cmdRes is not None:
             cmdRes.appendState(self, msg=answer)
 
-    async def _ask_once(self, prompt: str, token: str, *, stop_event=None) -> str:
+    async def _ask_once(self, prompt: str, token: str, *, stop_event=None, on_started=None) -> str:
         thread_id = uuid.uuid4().hex
         run_id = uuid.uuid4().hex
         endpoint = self.runtime.endpoint
@@ -87,6 +87,10 @@ class LLMCommand(Command):
                         "POST", endpoint, headers=headers, json=payload,
                     ) as response:
                         response.raise_for_status()
+                        # The backend now knows this thread/run pair. Expose it
+                        # to the Socket.IO bridge for targeted cancellation.
+                        if on_started is not None:
+                            on_started(thread_id, run_id)
                         return await self._read_answer(response, stop_event=stop_event)
         finally:
             # Always attempt deletion, even on approval, timeout or cancellation.
