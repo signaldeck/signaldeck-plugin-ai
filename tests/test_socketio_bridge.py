@@ -318,7 +318,7 @@ def test_real_backend_cancel_targets_only_current_run(monkeypatch):
         assert payload == {
             "action": "cancel", "threadId": "thread-123", "runId": "run-456",
         }
-        assert bridge.status()["active"] is None
+        wait_for(lambda: bridge.status()["active"] is None)
     finally:
         bridge.shutdown()
 
