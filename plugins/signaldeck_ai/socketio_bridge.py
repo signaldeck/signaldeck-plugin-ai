@@ -1,7 +1,7 @@
-"""Opt-in asynchronous one-shot AG-UI bridge for routed Socket.IO messages.
+"""Serialized Socket.IO AG-UI requests with targeted cancellation and status.
 
-No socketio dependency: inbound/outbound traffic uses SignalDeck's MessageBus.
-Requests are serialized to avoid consuming cli-agent's eight session slots.
+Inbound chat is routed by SignalDeck's existing MessageBus. Control messages
+are handled immediately rather than placed behind waiting agent questions.
 """
 from __future__ import annotations
 
@@ -11,12 +11,32 @@ import queue
 import threading
 from collections import deque
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, Callable
+
+import httpx
 
 from .chat_runtime import ChatActionError, ChatRuntime, MAX_MESSAGE_CHARS
 from .llm_command import LLMCommand
 
 _LOG = logging.getLogger(__name__)
+
+
+@dataclass
+class BridgeRequest:
+    request_id: str
+    response_source: str
+    room: str
+    prompt: str = field(repr=False)
+    cancelled: bool = False
+    cancel_requested: bool = False
+    cancel_accepted: bool = False
+    cancel_error: str | None = None
+    thread_id: str | None = None
+    run_id: str | None = None
+    token: str | None = field(default=None, repr=False)
+    cancel_started: bool = False
+    stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
 
 class SocketIOChatBridge:
@@ -56,11 +76,12 @@ class SocketIOChatBridge:
 
         self.ctx = ctx
         self.runtime = runtime
-        # One active run plus exactly max_queue waiting requests.
         self._slots = threading.BoundedSemaphore(max_queue + 1)
-        self._queue: queue.Queue[tuple[str, str, str]] = queue.Queue(maxsize=max_queue + 1)
+        self._queue: queue.Queue[BridgeRequest] = queue.Queue(maxsize=max_queue + 1)
         self._stopped = threading.Event()
         self._guard = threading.RLock()
+        self._active: BridgeRequest | None = None
+        self._waiting: dict[str, BridgeRequest] = {}
         self._seen: set[tuple[str, str]] = set()
         self._seen_order: deque[tuple[str, str]] = deque()
         self._ask = ask
@@ -77,6 +98,95 @@ class SocketIOChatBridge:
                 source=source, content=content,
                 metadata={"type": "chat", "content_type": "text", "system": False},
             )
+
+    def status(self, room: str | None = None) -> dict[str, Any]:
+        """Bounded, token-free status for the SignalDeck view and chat commands."""
+        with self._guard:
+            active = self._active
+            if active is not None and room is not None and active.room != room:
+                active = None
+            waiting = [
+                {"id": item.request_id, "room": item.room,
+                 "prompt": item.prompt[:160]}
+                for item in self._waiting.values()
+                if not item.cancelled and (room is None or item.room == room)
+            ]
+            return {
+                "active": ({
+                    "id": active.request_id,
+                    "room": active.room,
+                    "prompt": active.prompt[:160],
+                    "cancelling": active.cancel_requested,
+                } if active is not None else None),
+                "waiting": waiting,
+                "waiting_count": len(waiting),
+            }
+
+    def _cancel_upstream(self, item: BridgeRequest) -> None:
+        try:
+            with httpx.Client(timeout=8.0) as client:
+                response = client.post(
+                    self.runtime.endpoint,
+                    headers={
+                        **self.runtime._headers(item.token or ""),
+                        "Content-Type": "application/json",
+                    },
+                    json={"action": "cancel", "threadId": item.thread_id, "runId": item.run_id},
+                )
+            if response.status_code != 202:
+                raise RuntimeError(f"HTTP {response.status_code}")
+        except Exception:
+            _LOG.exception("Socket.IO cancellation failed (request=%s)", item.request_id)
+            with self._guard:
+                item.cancel_error = "Der Agent hat den Abbruch nicht bestätigt."
+                item.cancel_started = False
+            return
+        with self._guard:
+            item.cancel_accepted = True
+            item.stop_event.set()
+
+    def _start_cancel_locked(self, item: BridgeRequest) -> None:
+        if (item.cancel_started or item.cancel_accepted or item.thread_id is None
+                or item.run_id is None or item.token is None):
+            return
+        item.cancel_started = True
+        threading.Thread(
+            target=self._cancel_upstream, args=(item,),
+            name="signaldeck-socketio-cancel", daemon=True,
+        ).start()
+
+    def _on_started(self, item: BridgeRequest, thread_id: str, run_id: str) -> None:
+        with self._guard:
+            item.thread_id, item.run_id = thread_id, run_id
+            if item.cancel_requested:
+                self._start_cancel_locked(item)
+
+    def cancel(self, *, room: str | None = None, request_id: str | None = None) -> str:
+        """Request cancellation for the active run or a specified waiting request."""
+        with self._guard:
+            if self._stopped.is_set():
+                return "Der Haus-Assistent wird beendet."
+            item = self._active
+            if item is not None and (room is None or item.room == room) and (
+                request_id is None or item.request_id == request_id
+            ):
+                if item.cancel_requested:
+                    return "Abbruch bereits angefordert."
+                item.cancel_requested = True
+                # The injected test adapter has no upstream AG-UI run.
+                if self._ask is not None:
+                    item.cancel_accepted = True
+                    item.stop_event.set()
+                else:
+                    self._start_cancel_locked(item)
+                return "Abbruch angefordert."
+            if request_id is not None:
+                item = self._waiting.get(request_id)
+                if item is not None and (room is None or item.room == room):
+                    item.cancelled = True
+                    self._waiting.pop(request_id, None)
+                    return "Wartende Anfrage abgebrochen."
+            return "Keine passende laufende Anfrage vorhanden."
 
     def on_message(self, message: Any) -> None:
         meta = message.metadata or {}
@@ -97,11 +207,28 @@ class SocketIOChatBridge:
         with self._guard:
             if self._stopped.is_set() or key in self._seen:
                 return
-            # Keep only bounded de-duplication memory.
             self._seen.add(key)
             self._seen_order.append(key)
             while len(self._seen_order) > 1024:
                 self._seen.discard(self._seen_order.popleft())
+
+            # Commands bypass the queue. A room may only stop its own run.
+            if prompt.casefold() == "stop":
+                self._publish(response_source, self.cancel(room=room), room)
+                return
+            if prompt.casefold() == "status":
+                state = self.status(room)
+                active = state["active"]
+                description = (
+                    ("Abbruch läuft" if active["cancelling"] else "Eine Anfrage läuft")
+                    if active else "Keine Anfrage läuft"
+                )
+                self._publish(
+                    response_source,
+                    f"{description}; {state['waiting_count']} weitere Anfragen warten.",
+                    room,
+                )
+                return
             if not self._slots.acquire(blocking=False):
                 self._publish(
                     response_source,
@@ -109,9 +236,12 @@ class SocketIOChatBridge:
                     room,
                 )
                 return
+            item = BridgeRequest(event_id, response_source, room, prompt)
+            self._waiting[event_id] = item
             try:
-                self._queue.put_nowait((response_source, room, prompt))
+                self._queue.put_nowait(item)
             except queue.Full:
+                self._waiting.pop(event_id, None)
                 self._slots.release()
                 self._publish(
                     response_source,
@@ -122,30 +252,52 @@ class SocketIOChatBridge:
     def _run(self) -> None:
         while not self._stopped.is_set():
             try:
-                response_source, room, prompt = self._queue.get(timeout=0.2)
+                item = self._queue.get(timeout=0.2)
             except queue.Empty:
                 continue
             try:
-                if self._stopped.is_set():
-                    break
+                with self._guard:
+                    self._waiting.pop(item.request_id, None)
+                    if self._stopped.is_set() or item.cancelled:
+                        continue
+                    self._active = item
+                answer = None
                 try:
                     token = self.runtime.command_token()
+                    with self._guard:
+                        item.token = token
                     if self._ask is None:
                         answer = asyncio.run(
                             self._command._ask_once(
-                                prompt, token, stop_event=self._stopped
+                                item.prompt, token, stop_event=item.stop_event,
+                                on_started=lambda thread, run: self._on_started(
+                                    item, thread, run
+                                ),
                             )
                         )
                     else:
-                        answer = asyncio.run(self._ask(prompt, token))
+                        answer = asyncio.run(self._ask(item.prompt, token))
+                except asyncio.CancelledError:
+                    if not item.cancel_requested:
+                        _LOG.warning("Socket.IO run cancelled unexpectedly")
                 except ChatActionError:
                     answer = "Haus-Assistent nicht verbunden. Bitte zuerst in einer AI-Chat-View anmelden."
                 except Exception:
-                    _LOG.exception("Socket.IO AI one-shot failed for room=%s", room)
+                    _LOG.exception("Socket.IO AI one-shot failed for room=%s", item.room)
                     answer = "Der Haus-Assistent konnte die Anfrage nicht bearbeiten."
-                if answer:
-                    self._publish(response_source, answer, room)
+                with self._guard:
+                    if item.cancel_requested:
+                        answer = (item.cancel_error or (
+                            "Anfrage abgebrochen." if item.cancel_accepted
+                            else "Anfrage beendet; der Abbruch wurde nicht bestätigt."
+                        ))
+                    if answer:
+                        self._publish(item.response_source, answer, item.room)
             finally:
+                with self._guard:
+                    if self._active is item:
+                        self._active = None
+                    item.token = None
                 self._queue.task_done()
                 self._slots.release()
 
@@ -153,4 +305,6 @@ class SocketIOChatBridge:
         with self._guard:
             self._stopped.set()
             self._unsubscribe()
+            if self._active is not None:
+                self._active.stop_event.set()
         self._worker.join(timeout=2.0)
