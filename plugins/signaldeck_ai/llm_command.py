@@ -30,13 +30,13 @@ class LLMCommand(Command):
         name: str,
         runtime: ChatRuntime,
         *,
-        timeout_seconds: int = 120,
+        timeout_seconds: int = 1200,
         async_client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     ):
         if not isinstance(name, str) or not name.strip() or " " in name:
             raise ValueError("LLM Cmd name must be a nonempty single token")
-        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 600:
-            raise ValueError("LLM Cmd timeout_seconds must be between 1 and 600")
+        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 1200:
+            raise ValueError("LLM Cmd timeout_seconds must be between 1 and 1200")
         super().__init__(name, "Prompt cli-agent using a fresh temporary session")
         self.runtime = runtime
         self.timeout_seconds = timeout_seconds
