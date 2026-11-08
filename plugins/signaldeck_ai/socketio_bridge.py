@@ -36,6 +36,7 @@ class BridgeRequest:
     token: str | None = field(default=None, repr=False)
     cancel_started: bool = False
     stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    cancel_finished: threading.Event = field(default_factory=threading.Event, repr=False)
 
 
 class SocketIOChatBridge:
@@ -143,15 +144,18 @@ class SocketIOChatBridge:
                 item.cancel_error = "Der Agent hat den Abbruch nicht bestätigt."
                 item.cancel_requested = False
                 item.cancel_started = False
+                item.cancel_finished.set()
             return
         with self._guard:
             item.cancel_accepted = True
             item.stop_event.set()
+            item.cancel_finished.set()
 
     def _start_cancel_locked(self, item: BridgeRequest) -> None:
         if (item.cancel_started or item.cancel_accepted or item.thread_id is None
                 or item.run_id is None or item.token is None):
             return
+        item.cancel_finished.clear()
         item.cancel_started = True
         threading.Thread(
             target=self._cancel_upstream, args=(item,),
@@ -284,12 +288,23 @@ class SocketIOChatBridge:
                 except Exception:
                     _LOG.exception("Socket.IO AI one-shot failed for room=%s", item.room)
                     answer = "Der Haus-Assistent konnte die Anfrage nicht bearbeiten."
+                # The AG-UI run may succeed while cancellation is still in
+                # flight. Resolve the HTTP cancellation attempt before deciding
+                # whether to discard its answer. Do not hold _guard while
+                # waiting; the cancellation worker needs it to signal completion.
                 with self._guard:
-                    if item.cancel_requested:
-                        answer = (item.cancel_error or (
-                            "Anfrage abgebrochen." if item.cancel_accepted
-                            else "Anfrage beendet; der Abbruch wurde nicht bestätigt."
-                        ))
+                    pending_cancel = item.cancel_started and not item.cancel_accepted
+                if pending_cancel:
+                    # httpx has an 8-second timeout; cap this wait too so an
+                    # unresponsive cancellation cannot block subsequent jobs.
+                    item.cancel_finished.wait(timeout=12.0)
+                with self._guard:
+                    if item.cancel_accepted:
+                        answer = "Anfrage abgebrochen."
+                    elif item.cancel_requested and answer is None:
+                        answer = "Anfrage beendet; der Abbruch wurde nicht bestätigt."
+                    # A failed/rejected cancellation must preserve the actual
+                    # successful answer. Late 202 responses cannot erase it.
                     if answer:
                         self._publish(item.response_source, answer, item.room)
             finally:
